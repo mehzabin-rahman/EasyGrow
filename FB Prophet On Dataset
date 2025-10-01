@@ -1,40 +1,83 @@
 import pandas as pd
 from prophet import Prophet
 from datetime import datetime
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import numpy as np
+import matplotlib.pyplot as plt
 
-
+# --- 1. Load and Prepare Data ---
 df = pd.read_csv("one_month_soil_moisture.csv")
-df['ds'] = pd.to_datetime(df['timestamp'])
+df['ds'] = pd.to_datetime(df['timestamp']).dt.round('min')  # Round to nearest minute
 df['y'] = df['moisture']
+df = df[['ds', 'y']].dropna().sort_values('ds')
 
+# --- 2. Train-Test Split (last 1 day as test) ---
+split_time = df['ds'].max() - pd.Timedelta(days=1)
+train_df = df[df['ds'] < split_time]
+test_df = df[df['ds'] >= split_time]
 
-model = Prophet()
-model.fit(df[['ds', 'y']])
+# --- 3. Train Prophet Model ---
+model = Prophet(
+    changepoint_prior_scale=0.05,
+    seasonality_mode='multiplicative',
+    daily_seasonality=False
+)
+model.add_seasonality(name='hourly', period=1/24, fourier_order=8)
+model.add_seasonality(name='daily', period=1, fourier_order=10)
+model.fit(train_df)
 
-
-future = model.make_future_dataframe(periods=48*6, freq='10min')
+# --- 4. Predict on test range ---
+future = model.make_future_dataframe(periods=len(test_df), freq='10min')
 forecast = model.predict(future)
-now = datetime.now()
 
+# --- 5. Evaluation: Align and merge with test set ---
+forecast_eval = forecast[['ds', 'yhat']].copy()
+forecast_eval['ds'] = forecast_eval['ds'].dt.round('min')  # Ensure same format
+test_df['ds'] = test_df['ds'].dt.round('min')
 
-future = model.make_future_dataframe(periods=48*6, freq='10min')
-forecast = model.predict(future)
-now = datetime.now()
+# Merge only overlapping timestamps
+merged = pd.merge(test_df, forecast_eval, on='ds', how='inner')
 
-
-
-future_forecast = forecast[forecast['ds'] > now]
-threshold = 600
-below_threshold = future_forecast[future_forecast['yhat'] <= threshold]
-
-
-if below_threshold.empty:
-    print("✅ Moisture will stay above 600 for the next 48 hours. No watering needed soon.")
+# Safety check
+if merged.empty:
+    print("❌ No overlapping timestamps between prediction and test set. Check time formats and frequency.")
 else:
-    next_watering_time = below_threshold.iloc[0]['ds']
-    delta = next_watering_time - now
-    hours, remainder = divmod(delta.total_seconds(), 3600)
+    # --- 6. Calculate Errors ---
+    mae = mean_absolute_error(merged['y'], merged['yhat'])
+    rmse = np.sqrt(mean_squared_error(merged['y'], merged['yhat']))
+
+    print("\n📊 Model Evaluation on Test Set:")
+    print(f"   🔹 Mean Absolute Error (MAE):  {mae:.2f}")
+    print(f"   🔹 Root Mean Squared Error (RMSE):  {rmse:.2f}")
+
+    # --- 7. Plot ---
+    plt.figure(figsize=(12, 6))
+    plt.plot(merged['ds'], merged['y'], label='Actual')
+    plt.plot(merged['ds'], merged['yhat'], label='Predicted', linestyle='--')
+    plt.xlabel("Time")
+    plt.ylabel("Soil Moisture")
+    plt.title("Actual vs Predicted Moisture (Test Set)")
+    plt.legend()
+    plt.tight_layout()
+    plt.grid(True)
+    plt.show()
+
+# --- 8. Predict Watering Time (Next 6 Hours) ---
+future6h = model.make_future_dataframe(periods=36, freq='10min')
+forecast6h = model.predict(future6h)
+
+now = datetime.now()
+future_only = forecast6h[forecast6h['ds'] > now]
+threshold = 600
+dry_forecast = future_only[future_only['yhat'] > threshold]
+
+if dry_forecast.empty:
+    print("\n✅ Soil will stay wet (moisture ≤ 600) for the next 6 hours. No watering needed.")
+else:
+    next_dry_time = dry_forecast.iloc[0]['ds']
+    time_diff = next_dry_time - now
+    hours, remainder = divmod(time_diff.total_seconds(), 3600)
     minutes = remainder // 60
 
-    print(f"🌱 Next predicted watering time is in {int(hours)} hour(s) and {int(minutes)} minute(s).")
-    print(f"🕒 Estimated time: {next_watering_time.strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n💧 Next predicted watering needed in {int(hours)} hour(s) and {int(minutes)} minute(s).")
+    print(f"🕒 Estimated time to switch pump ON: {next_dry_time.strftime('%Y-%m-%d %H:%M')}")

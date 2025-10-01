@@ -1,0 +1,75 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Input
+
+# --- 1. Load and Prepare Data ---
+df = pd.read_csv("one_month_soil_moisture.csv")
+df['ds'] = pd.to_datetime(df['timestamp'])
+df.set_index('ds', inplace=True)
+df = df.asfreq('10min')  # uniform time series
+df['moisture'] = df['moisture'].interpolate(method='time')
+
+# --- 2. Normalize Data ---
+scaler = MinMaxScaler()
+scaled_data = scaler.fit_transform(df[['moisture']])
+
+# --- 3. Create sequences for LSTM ---
+def create_sequences(data, seq_len):
+    X, y = [], []
+    for i in range(len(data) - seq_len):
+        X.append(data[i:i+seq_len])
+        y.append(data[i+seq_len])
+    return np.array(X), np.array(y)
+
+seq_len = 36  # use past 6 hours (36 * 10min)
+X, y = create_sequences(scaled_data, seq_len)
+
+# --- 4. Build LSTM Model ---
+model = Sequential()
+model.add(Input(shape=(seq_len, 1)))
+model.add(LSTM(64))
+model.add(Dense(1))
+model.compile(optimizer='adam', loss='mse')
+
+# --- 5. Train Model ---
+model.fit(X, y, epochs=20, batch_size=32, verbose=0)
+
+# --- 6. Forecast Next 6 Hours ---
+last_seq = scaled_data[-seq_len:].reshape(1, seq_len, 1)
+forecast_scaled = []
+current_input = last_seq
+
+for _ in range(36):  # predict 36 future steps (6 hours)
+    next_pred = model.predict(current_input, verbose=0)
+    forecast_scaled.append(next_pred[0, 0])
+    next_pred_reshaped = next_pred.reshape(1, 1, 1)
+    current_input = np.append(current_input[:, 1:, :], next_pred_reshaped, axis=1)
+
+forecast = scaler.inverse_transform(np.array(forecast_scaled).reshape(-1, 1)).flatten()
+
+# --- 7. Create Future Timestamps ---
+last_time = df.index[-1]
+future_times = [last_time + timedelta(minutes=10 * i) for i in range(1, 37)]
+
+forecast_df = pd.DataFrame({'ds': future_times, 'yhat': forecast})
+
+# --- 8. Logic: Soil is WET if moisture ≤ 600, else DRY ---
+threshold = 600
+now = datetime.now()
+future_forecast = forecast_df[forecast_df['ds'] > now]
+dry_forecast = future_forecast[future_forecast['yhat'] > threshold]
+
+print(f"📊 Current moisture level: {df['moisture'].iloc[-1]:.2f}")
+
+if dry_forecast.empty:
+    print("✅ Soil will stay wet (moisture ≤ 600) for the next 6 hours. No watering needed.")
+else:
+    next_dry_time = dry_forecast.iloc[0]['ds']
+    time_diff = next_dry_time - now
+    hours, remainder = divmod(time_diff.total_seconds(), 3600)
+    minutes = remainder // 60
+    print(f"💧 Next predicted watering needed in {int(hours)} hour(s) and {int(minutes)} minute(s).")
+    print(f"🕒 Estimated time to switch pump ON: {next_dry_time.strftime('%Y-%m-%d %H:%M')}")

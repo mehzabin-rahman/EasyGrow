@@ -1,0 +1,43 @@
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+
+# --- 1. Load and prepare data ---
+df = pd.read_csv("one_month_soil_moisture.csv")
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df.set_index('timestamp', inplace=True)
+df = df.resample('H').mean()  # Resample to hourly to reduce load
+df = df.last('14D')           # Use only last 14 days
+df['moisture'].interpolate(inplace=True)
+
+# --- 2. Train SARIMA (via SARIMAX) ---
+model = SARIMAX(
+    df['moisture'],
+    order=(1, 1, 1),
+    seasonal_order=(1, 0, 1, 24),
+    enforce_stationarity=False,
+    enforce_invertibility=False
+)
+results = model.fit(disp=False)
+
+# --- 3. Forecast next 6 hours ---
+forecast = results.forecast(steps=6)
+future_index = pd.date_range(start=df.index[-1] + timedelta(hours=1), periods=6, freq='H')
+forecast_df = pd.DataFrame({'timestamp': future_index, 'moisture': forecast.values})
+
+# --- 4. Watering logic ---
+threshold = 600
+dry = forecast_df[forecast_df['moisture'] > threshold]
+if dry.empty:
+    print("✅ Soil will stay wet (≤ 600) for the next 6 hours.")
+else:
+    next_dry_time = dry.iloc[0]['timestamp']
+    time_diff = next_dry_time - datetime.now()
+    hours, remainder = divmod(time_diff.total_seconds(), 3600)
+    minutes = remainder // 60
+    print(f"💧 Next predicted watering needed in {int(hours)} hour(s) and {int(minutes)} minute(s).")
+    print(f"🕒 Estimated time to switch pump ON: {next_dry_time.strftime('%Y-%m-%d %H:%M')}")
+
+# --- 5. Plot ---

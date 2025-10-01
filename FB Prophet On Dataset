@@ -1,0 +1,40 @@
+import pandas as pd
+from prophet import Prophet
+from datetime import datetime
+
+
+df = pd.read_csv("one_month_soil_moisture.csv")
+df['ds'] = pd.to_datetime(df['timestamp'])
+df['y'] = df['moisture']
+
+
+model = Prophet()
+model.fit(df[['ds', 'y']])
+
+
+future = model.make_future_dataframe(periods=48*6, freq='10min')
+forecast = model.predict(future)
+now = datetime.now()
+
+
+future = model.make_future_dataframe(periods=48*6, freq='10min')
+forecast = model.predict(future)
+now = datetime.now()
+
+
+
+future_forecast = forecast[forecast['ds'] > now]
+threshold = 600
+below_threshold = future_forecast[future_forecast['yhat'] <= threshold]
+
+
+if below_threshold.empty:
+    print("✅ Moisture will stay above 600 for the next 48 hours. No watering needed soon.")
+else:
+    next_watering_time = below_threshold.iloc[0]['ds']
+    delta = next_watering_time - now
+    hours, remainder = divmod(delta.total_seconds(), 3600)
+    minutes = remainder // 60
+
+    print(f"🌱 Next predicted watering time is in {int(hours)} hour(s) and {int(minutes)} minute(s).")
+    print(f"🕒 Estimated time: {next_watering_time.strftime('%Y-%m-%d %H:%M')}")
